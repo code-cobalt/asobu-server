@@ -1,5 +1,4 @@
 import { createError } from 'apollo-errors'
-import User from '../components/User'
 
 //example of what an invalid graphql request will return:
 

@@ -22,7 +22,7 @@ interface NewUser {
   exp: number
   lvl: number
   stats: Stats
-  imei: string
+  token: string
 }
 
 interface UpdatedUser {
@@ -89,9 +89,6 @@ interface Message {
   content: string
 }
 
-//starting chatId at 5 to avoid duplication with seeds
-let chatId: number = 5
-
 // validation methods will return string with error message if not valid
 const validateNewUser = (newUser: NewUser) => {
   return 'valid'
@@ -115,6 +112,19 @@ const validateComment = (comment: Comment) => {
 
 const validateMessage = (message: Message) => {
   return 'valid'
+}
+
+const checkLevel = (currentExp: number) => {
+  if (currentExp < 100) return 1
+  if (currentExp >= 100 && currentExp < 200) return 2
+  if (currentExp >= 200 && currentExp < 400) return 3
+  if (currentExp >= 400 && currentExp < 600) return 4
+  if (currentExp >= 600 && currentExp < 900) return 5
+  if (currentExp >= 900 && currentExp < 1200) return 6
+  if (currentExp >= 1200 && currentExp < 1600) return 7
+  if (currentExp >= 1600 && currentExp < 2000) return 8
+  if (currentExp >= 2000 && currentExp < 3000) return 9
+  if (currentExp >= 3000) return 10
 }
 
 interface UserChat {
@@ -216,10 +226,19 @@ const root = {
     })
     if (validation === 'valid') {
       const event = await Event.create(newEvent)
-      await User.updateOne(
+      const creator = await User.findOneAndUpdate(
         { email: event.creator.email },
-        { $push: { events: { event_id: event.id, is_creator: true } } }
+        {
+          $push: { events: { event_id: event.id, is_creator: true } },
+          $inc: { exp: 20 }
+        },
+        { new: true }
       )
+      const creatorLevel = checkLevel(creator.exp)
+      if (creatorLevel !== creator.lvl) {
+        creator.lvl = creatorLevel
+        creator.save()
+      }
       return event
     } else {
       //specific validation error will be nested inside error object
@@ -314,10 +333,15 @@ const root = {
         sent_hangout_requests: [],
         received_hangout_requests: [],
         ongoing_hangouts: [],
-        pending_revies: [],
+        pending_reviews: [],
         blocked_users: [],
         blocked_by_users: [],
-        equipped_badges: []
+        equipped_badges: [],
+        longitude: 0,
+        latitude: 0,
+        is_active: false,
+        profile_photo:
+          'http://res.cloudinary.com/code-cobalt/image/upload/v1569216639/demo/itm00silr9mpdrwjtung.jpg'
       })
       const hash = bcrypt.hashSync(userObj.password, 10)
       userObj.password_hash = hash
@@ -330,16 +354,105 @@ const root = {
   },
 
   UpdateUser: async params => {
-    // TO DO When a user is updated, must also update userlimited object in all other places they can be located:
-    // event attendees, comments, & creator,
-    // messages,
-    // user chats
-    // user sent and received hangout requests,
-    // ongoing hangouts,
-    // pending reviews
-    //yikes...!
+    // When a user is updated, must also update userlimited object in all other places they can be located:
     const validation = validateUpdatedUser(params.updatedUser)
     if (validation === 'valid') {
+      const updatedUserLimited = {
+        first_name: params.updatedUser.first_name,
+        email: params.updatedUser.email,
+        profile_photo: params.updatedUser.profile_photo
+      }
+      const updatedHangoutUserLimited = {
+        ...updatedUserLimited,
+        equipped_badges: params.updatedUser.equipped_badges
+      }
+      const originalUser = await User.find({ email: params.userEmail })
+      //only update the following if email, first_name, profile_photo, or equipped_badges have changed:
+      if (
+        JSON.stringify(updatedHangoutUserLimited) !==
+        JSON.stringify({
+          first_name: originalUser.first_name,
+          email: originalUser.email,
+          profile_photo: originalUser.profile_photo,
+          equipped_badges: originalUser.equipped_badges
+        })
+      ) {
+        // update user in other users with chat
+        await User.updateMany(
+          { 'chats.participants.email': params.userEmail },
+          { $set: { 'chats.$.participants': updatedUserLimited } }
+        )
+        // update user in other users with sent hangout request
+        await User.updateMany(
+          { 'sent_hangout_requests.email': params.userEmail },
+          { $set: { sent_hangout_requests: updatedHangoutUserLimited } }
+        )
+        // update user in other users with received hangout request
+        await User.updateMany(
+          { 'received_hangout_requests.email': params.userEmail },
+          { $set: { received_hangout_requests: updatedHangoutUserLimited } }
+        )
+        // update user in other users with accepted hangout request
+        await User.updateMany(
+          { 'accepted_hangout_requests.email': params.userEmail },
+          { $set: { accepted_hangout_requests: updatedHangoutUserLimited } }
+        )
+        // update user in other users with ongoing hangout request
+        await User.updateMany(
+          { 'ongoing_hangouts.participants.email': params.userEmail },
+          {
+            $set: {
+              'ongoing_hangouts.$.participants': updatedHangoutUserLimited
+            }
+          }
+        )
+        // update all messages from user
+        await Message.updateMany(
+          { 'from.email': params.userEmail },
+          { $set: { from: updatedUserLimited } }
+        )
+        // update hangouts with user
+        await Hangout.updateMany(
+          { 'participants.email': params.userEmail },
+          { $set: { participants: updatedHangoutUserLimited } }
+        )
+        // update event comments posted by user
+        await Event.updateMany(
+          { 'comments.from.email': params.userEmail },
+          { $set: { 'comments.$.from': updatedUserLimited } }
+        )
+        // update event attendees with user
+        await Event.updateMany(
+          { 'attendees.email': params.userEmail },
+          { $set: { attendees: updatedUserLimited } }
+        )
+        // update event creator created by user
+        await Event.updateMany(
+          { 'creator.email': params.userEmail },
+          { $set: { creator: updatedUserLimited } }
+        )
+      }
+
+      // the following only need to change if the email changes:
+      if (params.userEmail !== params.updatedUser.email) {
+        // update user in other users with blocked user
+        await User.updateMany(
+          { blocked_users: params.userEmail },
+          { $set: { 'blocked_users.$': params.updatedUser.email } }
+        )
+        // update user in other users with blocked by user
+        await User.updateMany(
+          { blocked_by_users: params.userEmail },
+          { $set: { 'blocked_by_users.$': params.updatedUser.email } }
+        )
+        // update user email in other users with pending review. keep original information so that user can remember properly when
+        // reviewing, but update email so that it can be posted to database properly.
+        await User.updateMany(
+          { 'pending_reviews.email': params.userEmail },
+          { $set: { 'pending_reviews.$.email': params.updatedUser.email } }
+        )
+      }
+      //update and return actual user
       return await User.findOneAndUpdate(
         { email: params.userEmail },
         params.updatedUser,
@@ -438,14 +551,28 @@ const root = {
     for (const stat in params.newStats) {
       updatedStats[stat] += params.newStats[stat]
     }
-    await User.updateOne(
+    const partner = await User.findOneAndUpdate(
       { email: params.reviewedUserEmail },
       { stats: updatedStats }
     )
-    await User.updateOne(
+    let newExp = 40
+    if (partner.lvl === 1 || partner.lvl >= 10) {
+      newExp = 120
+    }
+
+    const updatedUser = await User.findOneAndUpdate(
       { email: params.currentUserEmail },
-      { $pull: { pending_reviews: { email: params.reviewedUserEmail } } }
+      {
+        $pull: { pending_reviews: { email: params.reviewedUserEmail } },
+        $inc: { exp: newExp }
+      },
+      { new: true }
     )
+    const level = checkLevel(updatedUser.exp)
+    if (level !== updatedUser.lvl) {
+      updatedUser.lvl = level
+      updatedUser.save()
+    }
     return updatedStats
   },
 
@@ -455,26 +582,8 @@ const root = {
       { $inc: { exp: params.points } },
       { new: true }
     )
-    // implement level checking
-    if (user.exp >= 100 && user.exp < 200 && user.lvl !== 2) {
-      await User.updateOne({ email: params.userEmail }, { lvl: 2 })
-    } else if (user.exp >= 200 && user.exp < 400 && user.lvl !== 3) {
-      await User.updateOne({ email: params.userEmail }, { lvl: 3 })
-    } else if (user.exp >= 400 && user.exp < 600 && user.lvl !== 4) {
-      await User.updateOne({ email: params.userEmail }, { lvl: 4 })
-    } else if (user.exp >= 600 && user.exp < 900 && user.lvl !== 5) {
-      await User.updateOne({ email: params.userEmail }, { lvl: 5 })
-    } else if (user.exp >= 900 && user.exp < 1200 && user.lvl !== 6) {
-      await User.updateOne({ email: params.userEmail }, { lvl: 6 })
-    } else if (user.exp >= 1200 && user.exp < 1600 && user.lvl !== 7) {
-      await User.updateOne({ email: params.userEmail }, { lvl: 7 })
-    } else if (user.exp >= 1600 && user.exp < 2000 && user.lvl !== 8) {
-      await User.updateOne({ email: params.userEmail }, { lvl: 8 })
-    } else if (user.exp >= 2000 && user.exp < 3000 && user.lvl !== 9) {
-      await User.updateOne({ email: params.userEmail }, { lvl: 9 })
-    } else if (user.exp >= 3000 && user.lvl !== 10) {
-      await User.updateOne({ email: params.userEmail }, { lvl: 10 })
-    }
+    const level = checkLevel(user.exp)
+    await User.updateOne({ email: params.userEmail }, { lvl: level })
     //return new exp total
     return user.exp
   },
@@ -498,14 +607,29 @@ const root = {
         profile_photo: toUser.profile_photo,
         equipped_badges: toUser.equipped_badges
       }
-      await User.updateOne(
-        { email: params.currentUserEmail },
-        { $push: { sent_hangout_requests: toUserLimited } }
-      )
-      await User.updateOne(
+      const partner = await User.findOneAndUpdate(
         { email: params.toUserEmail },
         { $push: { received_hangout_requests: fromUserLimited } }
       )
+      //triple exp points if partner is level 1 or >= 10
+      let newExp = 10
+      if (partner.lvl === 1 || partner.lvl >= 10) {
+        newExp = 30
+      }
+      const updatedUser = await User.findOneAndUpdate(
+        { email: params.currentUserEmail },
+        {
+          $push: { sent_hangout_requests: toUserLimited },
+          $inc: { exp: newExp }
+        },
+        { new: true }
+      )
+      const level = checkLevel(updatedUser.exp)
+      if (level !== updatedUser.lvl) {
+        updatedUser.lvl = level
+        updatedUser.save()
+      }
+
       return `${params.currentUserEmail} has successfully sent a hangout request to ${params.toUserEmail}!`
     }
   },
@@ -554,8 +678,9 @@ const root = {
         )
         return existingChat
       } else {
-        //create new unique chatId
-        const newChat = ++chatId
+        //generate unique chatId from empty message. This way impossible to have duplicate chatIds within database.
+        const emptyMessage = await Message.create({})
+        const chatId = emptyMessage._id
         //delete hangout request and create new chat for each user
         await User.updateOne(
           { email: params.fromUserEmail },
@@ -564,7 +689,7 @@ const root = {
 
             $push: {
               chats: {
-                chat_id: newChat,
+                chat_id: chatId,
                 participants: [
                   {
                     email: currentUser.email,
@@ -578,7 +703,7 @@ const root = {
           }
         )
         const currentUserChat = {
-          chat_id: newChat,
+          chat_id: chatId,
           participants: [
             {
               email: fromUser.email,
@@ -626,7 +751,7 @@ const root = {
       status: 'ongoing'
     })
 
-    await User.updateOne(
+    const userOne = await User.findOneAndUpdate(
       { email: params.participants[0].email },
       {
         $push: {
@@ -635,10 +760,17 @@ const root = {
             participants: [params.participants[1]]
           }
         },
-        $pull: { accepted_hangouts: { email: params.participants[1].email } }
-      }
+        $pull: { accepted_hangouts: { email: params.participants[1].email } },
+        $inc: { exp: 50 }
+      },
+      { new: true }
     )
-    await User.updateOne(
+    const userOneLevel = checkLevel(userOne.exp)
+    if (userOneLevel !== userOne.lvl) {
+      userOne.lvl = userOneLevel
+      userOne.save()
+    }
+    const userTwo = await User.findOneAndUpdate(
       { email: params.participants[1].email },
       {
         $push: {
@@ -647,42 +779,69 @@ const root = {
             participants: [params.participants[0]]
           }
         },
-        $pull: { accepted_hangouts: { email: params.participants[0].email } }
-      }
+        $pull: { accepted_hangouts: { email: params.participants[0].email } },
+        $inc: { exp: 50 }
+      },
+      { new: true }
     )
+    const userTwoLevel = checkLevel(userTwo.exp)
+    if (userTwoLevel !== userTwo.lvl) {
+      userTwo.lvl = userTwoLevel
+      userTwo.save()
+    }
     return hangout._id
   },
 
   FinishHangout: async params => {
     // change status of hangout to complete, delete each user from the other users' ongoing_hangouts,
     // and add each user to each other users' pending_reviews
-    const hangout = await Hangout.findOneAndUpdate(
-      { _id: params.hangoutId },
-      { status: 'complete' }
-    )
-    await User.updateOne(
-      { email: hangout.participants[0].email },
-      {
-        $pull: {
-          ongoing_hangouts: {
-            hangout_id: params.hangoutId
-          }
+    const hangout = await Hangout.findById(params.hangoutId)
+    if (hangout.status !== 'complete') {
+      hangout.status = 'complete'
+      hangout.save()
+      const userOne = await User.findOneAndUpdate(
+        { email: hangout.participants[0].email },
+        {
+          $pull: {
+            ongoing_hangouts: {
+              hangout_id: params.hangoutId
+            }
+          },
+          $push: {
+            pending_reviews: hangout.participants[1]
+          },
+          $inc: { exp: 30 }
         },
-        $push: { pending_reviews: hangout.participants[1] }
+        { new: true }
+      )
+      const userOneLevel = checkLevel(userOne.exp)
+      if (userOneLevel !== userOne.lvl) {
+        userOne.lvl = userOneLevel
+        userOne.save()
       }
-    )
-    await User.updateOne(
-      { email: hangout.participants[1].email },
-      {
-        $pull: {
-          ongoing_hangouts: {
-            hangout_id: params.hangoutId
-          }
+      const userTwo = await User.findOneAndUpdate(
+        { email: hangout.participants[1].email },
+        {
+          $pull: {
+            ongoing_hangouts: {
+              hangout_id: params.hangoutId
+            }
+          },
+          $push: {
+            pending_reviews: hangout.participants[0]
+          },
+          $inc: { exp: 30 }
         },
-        $push: { pending_reviews: hangout.participants[0] }
+        { new: true }
+      )
+      const userTwoLevel = checkLevel(userTwo.exp)
+      if (userTwoLevel !== userTwo.lvl) {
+        userTwo.lvl = userTwoLevel
+        userTwo.save()
       }
-    )
-    return `${hangout.participants[0].first_name} and ${hangout.participants[1].first_name} have finished hanging out.`
+      return `${hangout.participants[0].first_name} and ${hangout.participants[1].first_name} have finished hanging out.`
+    }
+    return 'Hangout has already been finished.'
   },
 
   Hangouts: async () => {
